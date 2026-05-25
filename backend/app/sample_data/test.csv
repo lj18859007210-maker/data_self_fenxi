@@ -1,0 +1,11 @@
+name,age,salary,active,department,join_date
+Alice,30,75000,true,Engineering,2020-01-15
+Bob,25,65000,true,Engineering,2021-03-20
+Charlie,35,85000,false,Marketing,2019-07-01
+Diana,28,70000,true,Sales,2022-02-10
+Eve,45,95000,true,Engineering,2018-05-22
+Frank,32,72000,false,Sales,2020-11-03
+Grace,29,68000,true,Marketing,2021-08-17
+Henry,38,88000,true,Engineering,2019-12-30
+Isabella,26,62000,true,Sales,2022-06-14
+Jack,41,91000,false,Marketing,2017-09-25

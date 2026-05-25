@@ -5,3 +5,6 @@ dist/
 .env
 backend/data/uploads/
 .superpowers/
+*.log
+*.tsbuildinfo
+backend/data/sessions.db
