@@ -23,9 +23,13 @@ def _resolve_session(session_id: str):
 
 def _resolve_results(session_id: str):
     """Get analysis results from memory or SQLite."""
-    results = _resolve_results(session_id)
-    if not results:
+    store = analysis_store.get(session_id)
+    if store and "results" in store:
+        results = store["results"]
+    else:
         results = storage.get_results(session_id)
+    if not results:
+        return {}
     return results
 
 

@@ -1,5 +1,5 @@
 """
-insight_engine.py — Automatic insight discovery engine.
+Automatic insight discovery engine.
 
 Scans all field combinations and produces structured insights:
 - Distribution insights (skewed, uniform, sparse)
@@ -10,16 +10,27 @@ Scans all field combinations and produces structured insights:
 - Time series insights (trends, seasonality)
 """
 
-import polars as pl
-import numpy as np
-from scipy import stats
+from __future__ import annotations
+
 from typing import Any
+
+import numpy as np
+import polars as pl
+
 from app.models.session import FieldType
+from app.services.stat_utils import f_oneway, pearsonr, skew
 
 
 class Insight:
-    def __init__(self, insight_type: str, field: str, title: str, description: str,
-                 score: float, detail: dict | None = None):
+    def __init__(
+        self,
+        insight_type: str,
+        field: str,
+        title: str,
+        description: str,
+        score: float,
+        detail: dict | None = None,
+    ):
         self.type = insight_type
         self.field = field
         self.title = title
@@ -49,28 +60,34 @@ def discover_insights(df: pl.DataFrame, fields_meta: list[Any]) -> list[dict]:
             continue
         arr = series.to_numpy()
 
-        # Check skewness
-        skew = float(stats.skew(arr))
-        if abs(skew) > 1.0:
-            direction = "右偏（长尾在右侧）" if skew > 0 else "左偏（长尾在左侧）"
-            insights.append(Insight(
-                "distribution", field.name,
-                f"「{field.name}」分布偏斜",
-                f"{field.name}的分布呈{direction}，偏度={skew:.2f}，可能存在极端值影响",
-                min(abs(skew) / 3, 1.0) * 0.7,
-                {"skewness": round(skew, 4), "direction": "right" if skew > 0 else "left"},
-            ))
+        skewness = float(skew(arr))
+        if abs(skewness) > 1.0:
+            direction = "right" if skewness > 0 else "left"
+            insights.append(
+                Insight(
+                    "distribution",
+                    field.name,
+                    f"{field.name} skewed distribution",
+                    f"{field.name} shows a {direction}-skewed distribution with skewness {skewness:.2f}.",
+                    min(abs(skewness) / 3, 1.0) * 0.7,
+                    {"skewness": round(skewness, 4), "direction": direction},
+                )
+            )
 
         # Check high cardinality / spread
-        cv = float(np.std(arr) / np.mean(arr)) if np.mean(arr) != 0 else 0
+        mean = float(np.mean(arr))
+        cv = float(np.std(arr) / mean) if mean != 0 else 0.0
         if cv > 2.0:
-            insights.append(Insight(
-                "distribution", field.name,
-                f"「{field.name}」波动很大",
-                f"变异系数={cv:.2f}，数据离散程度很高，建议检查是否存在异常值",
-                min(cv / 5, 1.0) * 0.5,
-                {"cv": round(cv, 4)},
-            ))
+            insights.append(
+                Insight(
+                    "distribution",
+                    field.name,
+                    f"{field.name} highly variable",
+                    f"Coefficient of variation is {cv:.2f}, suggesting a very wide spread.",
+                    min(cv / 5, 1.0) * 0.5,
+                    {"cv": round(cv, 4)},
+                )
+            )
 
     # 2. Outlier insights
     for field in [f for f in fields_meta if f.display_type == FieldType.NUMERIC]:
@@ -85,47 +102,60 @@ def discover_insights(df: pl.DataFrame, fields_meta: list[Any]) -> list[dict]:
         outlier_ratio = float(np.mean((arr < lower) | (arr > upper)))
 
         if outlier_ratio > 0.05:
-            insights.append(Insight(
-                "outlier", field.name,
-                f"「{field.name}」存在{outlier_ratio*100:.1f}%的异常值",
-                f"基于 IQR 方法检测到异常值占比 {outlier_ratio*100:.1f}%，建议关注极端值",
-                min(outlier_ratio * 2, 1.0) * 0.8,
-                {"outlier_ratio": round(outlier_ratio, 4)},
-            ))
+            insights.append(
+                Insight(
+                    "outlier",
+                    field.name,
+                    f"{field.name} outlier signal",
+                    f"IQR-based outlier ratio is {outlier_ratio * 100:.1f}%.",
+                    min(outlier_ratio * 2, 1.0) * 0.8,
+                    {"outlier_ratio": round(outlier_ratio, 4)},
+                )
+            )
 
     # 3. Missing data insights
     for field in fields_meta:
         series = df[field.name]
         null_ratio = float(series.is_null().mean())
         if null_ratio > 0.05:
-            insights.append(Insight(
-                "missing", field.name,
-                f"「{field.name}」缺失率 {null_ratio*100:.1f}%",
-                f"该字段缺失 {int(series.is_null().sum())} 条数据（占比 {null_ratio*100:.1f}%），可能影响分析质量",
-                min(null_ratio * 2, 1.0) * 0.6,
-                {"missing_rate": round(null_ratio, 4), "missing_count": int(series.is_null().sum())},
-            ))
+            insights.append(
+                Insight(
+                    "missing",
+                    field.name,
+                    f"{field.name} has missing values",
+                    f"{int(series.is_null().sum())} values are missing ({null_ratio * 100:.1f}%).",
+                    min(null_ratio * 2, 1.0) * 0.6,
+                    {"missing_rate": round(null_ratio, 4), "missing_count": int(series.is_null().sum())},
+                )
+            )
 
     # 4. Correlation insights
     numeric_cols = [f.name for f in fields_meta if f.display_type == FieldType.NUMERIC]
     if len(numeric_cols) >= 2:
         num_df = df.select(numeric_cols).drop_nulls()
         if len(num_df) >= 10:
-            corr_matrix = num_df.to_numpy()
-            corr = np.corrcoef(corr_matrix.T)
+            corr_matrix = np.corrcoef(num_df.to_numpy().T)
             for i in range(len(numeric_cols)):
                 for j in range(i + 1, len(numeric_cols)):
-                    r = corr[i, j]
-                    if abs(r) >= 0.7:
-                        direction = "正相关" if r > 0 else "负相关"
-                        insights.append(Insight(
-                            "correlation", f"{numeric_cols[i]},{numeric_cols[j]}",
-                            f"「{numeric_cols[i]}」与「{numeric_cols[j]}」强{direction}",
-                            f"相关系数 r={r:.3f}，{direction}关系显著",
+                    r = float(corr_matrix[i, j])
+                    if not np.isfinite(r) or abs(r) < 0.7:
+                        continue
+                    direction = "positive" if r > 0 else "negative"
+                    insights.append(
+                        Insight(
+                            "correlation",
+                            f"{numeric_cols[i]},{numeric_cols[j]}",
+                            f"{numeric_cols[i]} and {numeric_cols[j]} are strongly correlated",
+                            f"Correlation coefficient is {r:.3f} ({direction}).",
                             abs(r) * 0.9,
-                            {"field1": numeric_cols[i], "field2": numeric_cols[j],
-                             "correlation": round(r, 4), "direction": direction},
-                        ))
+                            {
+                                "field1": numeric_cols[i],
+                                "field2": numeric_cols[j],
+                                "correlation": round(r, 4),
+                                "direction": direction,
+                            },
+                        )
+                    )
 
     # 5. Category imbalance insights
     for field in [f for f in fields_meta if f.display_type in (FieldType.CATEGORY, FieldType.TEXT, FieldType.BOOLEAN)]:
@@ -135,23 +165,31 @@ def discover_insights(df: pl.DataFrame, fields_meta: list[Any]) -> list[dict]:
         freq = series.value_counts().sort("count", descending=True)
         top_ratio = freq["count"][0] / len(series)
         if top_ratio > 0.8:
-            insights.append(Insight(
-                "imbalance", field.name,
-                f"「{field.name}」分布严重不均",
-                f"最多的一类「{freq[field.name][0]}」占比 {top_ratio*100:.1f}%，数据极度不平衡",
-                top_ratio * 0.5,
-                {"top_category": str(freq[field.name][0]), "top_ratio": round(top_ratio, 4)},
-            ))
+            insights.append(
+                Insight(
+                    "imbalance",
+                    field.name,
+                    f"{field.name} is imbalanced",
+                    f"The top category accounts for {top_ratio * 100:.1f}% of non-null values.",
+                    top_ratio * 0.5,
+                    {"top_category": str(freq[field.name][0]), "top_ratio": round(top_ratio, 4)},
+                )
+            )
 
     # 6. Category vs numeric comparison insights
     cat_fields = [f for f in fields_meta if f.display_type in (FieldType.CATEGORY, FieldType.TEXT)]
     num_fields = [f for f in fields_meta if f.display_type == FieldType.NUMERIC]
     for cat_f in cat_fields[:3]:
         for num_f in num_fields[:3]:
-            grouped = df.group_by(cat_f.name).agg(
-                pl.col(num_f.name).mean().alias("mean"),
-                pl.col(num_f.name).count().alias("count"),
-            ).filter(pl.col("count") >= 10).sort("mean", descending=True)
+            grouped = (
+                df.group_by(cat_f.name)
+                .agg(
+                    pl.col(num_f.name).mean().alias("mean"),
+                    pl.col(num_f.name).count().alias("count"),
+                )
+                .filter(pl.col("count") >= 10)
+                .sort("mean", descending=True)
+            )
 
             if len(grouped) >= 2:
                 means = grouped["mean"].to_numpy()
@@ -160,14 +198,22 @@ def discover_insights(df: pl.DataFrame, fields_meta: list[Any]) -> list[dict]:
                 ratio = means[0] / means[-1] if means[-1] != 0 else 0
 
                 if ratio > 2.0:
-                    insights.append(Insight(
-                        "comparison", f"{cat_f.name},{num_f.name}",
-                        f"「{top}」的{num_f.name}显著高于「{bottom}」",
-                        f"最高组均值是最低组的 {ratio:.1f} 倍，差异显著",
-                        min(ratio / 5, 1.0) * 0.75,
-                        {"category_field": cat_f.name, "numeric_field": num_f.name,
-                         "top_group": str(top), "bottom_group": str(bottom), "ratio": round(ratio, 2)},
-                    ))
+                    insights.append(
+                        Insight(
+                            "comparison",
+                            f"{cat_f.name},{num_f.name}",
+                            f"{top} outperforms {bottom}",
+                            f"The highest group mean is {ratio:.1f}x the lowest group mean.",
+                            min(ratio / 5, 1.0) * 0.75,
+                            {
+                                "category_field": cat_f.name,
+                                "numeric_field": num_f.name,
+                                "top_group": str(top),
+                                "bottom_group": str(bottom),
+                                "ratio": round(ratio, 2),
+                            },
+                        )
+                    )
 
     # 7. Unique / cardinality insights
     for field in fields_meta:
@@ -176,15 +222,17 @@ def discover_insights(df: pl.DataFrame, fields_meta: list[Any]) -> list[dict]:
             continue
         unique = len(series.unique())
         if unique == 1:
-            insights.append(Insight(
-                "cardinality", field.name,
-                f"「{field.name}」所有值完全相同",
-                f"该字段只有一个唯一值「{series[0]}」，对分析没有区分度",
-                0.3,
-                {"unique_count": 1, "value": str(series[0])},
-            ))
+            insights.append(
+                Insight(
+                    "cardinality",
+                    field.name,
+                    f"{field.name} has only one value",
+                    f"The field contains a single unique value: {series[0]}.",
+                    0.3,
+                    {"unique_count": 1, "value": str(series[0])},
+                )
+            )
 
-    # Sort by score descending
     insights.sort(key=lambda x: x.score, reverse=True)
     return [i.to_dict() for i in insights]
 
@@ -207,7 +255,6 @@ def compute_key_drivers(df: pl.DataFrame, target_field: str) -> list[dict]:
         if len(other) < 10:
             continue
 
-        # Align data
         combined = df.select([target_field, col]).drop_nulls()
         if len(combined) < 10:
             continue
@@ -216,42 +263,49 @@ def compute_key_drivers(df: pl.DataFrame, target_field: str) -> list[dict]:
         is_num = dtype in (pl.Float32, pl.Float64, pl.Int64, pl.Int32)
 
         if is_num:
-            # Pearson correlation
             x = combined[target_field].to_numpy()
             y = combined[col].to_numpy()
             if len(x) >= 10:
-                r, p = stats.pearsonr(x, y)
-                drivers.append({
-                    "field": col,
-                    "type": "numeric",
-                    "score": abs(r),
-                    "correlation": round(float(r), 4),
-                    "p_value": round(float(p), 6),
-                    "direction": "positive" if r > 0 else "negative",
-                    "description": f"相关系数 r={r:.3f}，p={p:.4f}",
-                })
+                r, p = pearsonr(x, y)
+                if not np.isfinite(r):
+                    continue
+                drivers.append(
+                    {
+                        "field": col,
+                        "type": "numeric",
+                        "score": abs(r),
+                        "correlation": round(float(r), 4),
+                        "p_value": round(float(p), 6),
+                        "direction": "positive" if r > 0 else "negative",
+                        "description": f"Correlation coefficient r={r:.3f}, p={p:.4f}",
+                    }
+                )
         else:
-            # ANOVA for categorical
             groups = []
             for cat in combined[col].unique():
                 vals = combined.filter(pl.col(col) == cat)[target_field].drop_nulls().to_numpy()
                 if len(vals) >= 3:
                     groups.append(vals)
             if len(groups) >= 2:
-                f_stat, p_val = stats.f_oneway(*groups)
+                f_stat, p_val = f_oneway(*groups)
+                if not np.isfinite(f_stat):
+                    continue
                 n_total = sum(len(g) for g in groups)
                 if n_total > 0:
                     eta_sq = f_stat * (len(groups) - 1) / (f_stat * (len(groups) - 1) + n_total - len(groups))
-                    drivers.append({
-                        "field": col,
-                        "type": "categorical",
-                        "score": eta_sq,
-                        "f_statistic": round(float(f_stat), 4),
-                        "p_value": round(float(p_val), 6),
-                        "eta_squared": round(float(eta_sq), 4),
-                        "description": f"F={f_stat:.2f}，p={p_val:.4f}，Eta²={eta_sq:.3f}",
-                    })
+                    if not np.isfinite(eta_sq):
+                        continue
+                    drivers.append(
+                        {
+                            "field": col,
+                            "type": "categorical",
+                            "score": eta_sq,
+                            "f_statistic": round(float(f_stat), 4),
+                            "p_value": round(float(p_val), 6),
+                            "eta_squared": round(float(eta_sq), 4),
+                            "description": f"F={f_stat:.2f}, p={p_val:.4f}, eta^2={eta_sq:.3f}",
+                        }
+                    )
 
-    # Sort by score descending
     drivers.sort(key=lambda x: x["score"], reverse=True)
     return drivers

@@ -1,7 +1,7 @@
 import polars as pl
 import numpy as np
-from scipy import stats
 from typing import Any
+from app.services.stat_utils import chi2_contingency, f_oneway
 
 
 def compute_cross_tabulation(
@@ -46,7 +46,7 @@ def _compute_contingency(df: pl.DataFrame, row_field: str, col_field: str, top_n
     # Chi-square test
     observed = np.array(matrix)
     if observed.size > 0 and observed.shape[0] > 1 and observed.shape[1] > 1:
-        chi2, p_value, dof, expected = stats.chi2_contingency(observed)
+        chi2, p_value, dof, expected = chi2_contingency(observed)
         n = observed.sum()
         cramers_v = np.sqrt(chi2 / (n * min(observed.shape[0] - 1, observed.shape[1] - 1))) if n > 0 else None
     else:
@@ -87,7 +87,7 @@ def _compute_group_stats(df: pl.DataFrame, cat_field: str, num_field: str, top_n
 
     # One-way ANOVA
     if len(group_data) >= 2:
-        f_stat, p_value = stats.f_oneway(*group_data)
+        f_stat, p_value = f_oneway(*group_data)
         n_total = sum(len(g) for g in group_data)
         eta_sq = f_stat * (len(group_data) - 1) / (f_stat * (len(group_data) - 1) + n_total - len(group_data))
     else:

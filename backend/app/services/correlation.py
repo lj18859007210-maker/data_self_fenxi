@@ -1,7 +1,7 @@
 import polars as pl
 import numpy as np
-from scipy import stats
 from typing import Any
+from app.services.stat_utils import pearsonr
 
 
 def compute_correlation_matrix(df: pl.DataFrame) -> dict[str, Any]:
@@ -30,7 +30,10 @@ def compute_correlation_matrix(df: pl.DataFrame) -> dict[str, Any]:
 
             # Align by truncating to same length for correlation
             min_len = min(len(s1), len(s2))
-            r, p = stats.pearsonr(s1[:min_len], s2[:min_len])
+            r, p = pearsonr(s1[:min_len], s2[:min_len])
+            if not np.isfinite(r):
+                row.append(None)
+                continue
             row.append(round(float(r), 4))
 
             if i < j:
